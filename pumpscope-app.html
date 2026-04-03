@@ -295,7 +295,7 @@ canvas{display:block;width:100% !important;}
   <div class="sec-wrap">
     <div class="sec-hdr">
       <div class="sec-tag">⚡ JUST LAUNCHED</div>
-      <div class="sec-desc">30 seconds – 2 minutes old · Hype or die window</div>
+      <div class="sec-desc">10 seconds – 10 minutes old · Hype or die window</div>
       <div class="spin" id="sp0r"></div>
       <div class="sec-cnt" id="sc0">0 coins</div>
     </div>
@@ -308,7 +308,7 @@ canvas{display:block;width:100% !important;}
   <div class="sec-wrap">
     <div class="sec-hdr">
       <div class="sec-tag y">🔥 ACTIVE MOVERS</div>
-      <div class="sec-desc">2 – 30 minutes old · $20k+ market cap · Survivors</div>
+      <div class="sec-desc">2 minutes – 2 hours old · $3k+ market cap · Survivors</div>
       <div class="spin y" id="sp1r"></div>
       <div class="sec-cnt" id="sc1">0 coins</div>
     </div>
@@ -442,17 +442,17 @@ async function scanAll(){
 
   let [r0,r1,r2]=await Promise.all([api('/api/fresh'),api('/api/active'),api('/api/raydium')]);
 
-  // Debug: show what we got in header
+  // Debug status
   const dbg=document.getElementById('dbgStatus');
   if(dbg){
-    const s0=r0?`fresh:${r0.length}`:'fresh:ERR';
-    const s1=r1?`active:${r1.length}`:'active:ERR';
-    const s2=r2?`ray:${r2.length}`:'ray:ERR';
+    const s0=r0!=null?`fresh:${r0.length}`:'fresh:ERR';
+    const s1=r1!=null?`active:${r1.length}`:'active:ERR';
+    const s2=r2!=null?`ray:${r2.length}`:'ray:ERR';
     dbg.textContent=`[${s0} ${s1} ${s2}]`;
   }
 
-  // Only use sim if real API completely fails AND returns null
-  // If it returns empty array [], that means real API works but no coins in range
+  // Only simulate if worker is completely unreachable (null)
+  // Empty array [] means worker works but no coins matched — keep empty, don't fake
   if(r0===null) r0=simBatch(16,'fresh');
   if(r1===null) r1=simBatch(14,'active');
   if(r2===null) r2=simBatch(10,'raydium');
@@ -594,7 +594,7 @@ function renderGrid(idx){
   document.getElementById('sc'+idx).textContent=list.length+' coins';
   document.getElementById('nb'+idx).textContent=list.length;
   g.innerHTML='';
-  if(!list.length){g.innerHTML=`<div class="empty"><div class="empty-ico">🔭</div><div class="empty-txt">No coins in this range yet.<br>Scanning${idx===2?' Raydium &':''} pump.fun...</div></div>`;return;}
+  if(!list.length){g.innerHTML=`<div class="empty"><div class="empty-ico">🔭</div><div class="empty-txt">No coins right now.<br>Pump.fun is live — tap REFRESH to check again!</div></div>`;return;}
   [...list].sort((a,b)=>b.moon-a.moon).forEach((t,i)=>g.appendChild(mkCard(t,i,idx===2)));
 }
 
