@@ -219,7 +219,7 @@ body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* === TOAST === */
-.toast{position:fixed;top:62px;left:50%;transform:translateX(-50%) translateY(-16px);background:var(--surface2);border:1px solid var(--border2);border-radius:9px;padding:9px 14px;font-size:12px;font-weight:600;z-index:600;opacity:0;transition:all .22s;white-space:nowrap;max-width:320px;pointer-events:none;font-family:var(--mono)}
+.toast{position:fixed;top:62px;left:50%;transform:translateX(-50%) translateY(-16px);background:var(--surface2);border:1px solid var(--border2);border-radius:9px;padding:9px 14px;font-size:12px;font-weight:600;z-index:600;opacity:0;transition:all .22s;white-space:normal;max-width:340px;width:90%;text-align:center;pointer-events:none;font-family:var(--mono);line-height:1.4}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.ok{border-color:rgba(0,229,176,.4);color:var(--accent)}
 .toast.err{border-color:rgba(255,61,94,.4);color:var(--red)}
@@ -810,7 +810,15 @@ const JUP_QUOTE      = 'https://quote-api.jup.ag/v6';
 const JUP_PRICE      = 'https://api.jup.ag/price/v2';
 const DEXSCREENER    = 'https://api.dexscreener.com';
 const SOLSCAN        = 'https://solscan.io/tx/';
-const DEFAULT_RPC    = 'https://api.mainnet-beta.solana.com';
+// Multiple free public RPCs — tried in order, first live one wins
+const RPC_LIST = [
+  'https://rpc.ankr.com/solana',           // Ankr — reliable free tier
+  'https://api.mainnet-beta.solana.com',   // Official Solana
+  'https://solana-mainnet.rpc.extrnode.com', // Extrnode free
+  'https://mainnet.rpcpool.com',           // RPCPool free
+  'https://solana.drpc.org',               // dRPC free
+];
+const DEFAULT_RPC = 'auto';
 
 // ═══════════════════════════════════════════════════════════════
 // STATE
@@ -872,16 +880,9 @@ const fmtSOL  = n => n == null ? '—' : Number(n).toFixed(4);
 const fmtUSD  = n => n == null ? '—' : '$' + Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtPct  = n => n == null ? '—' : (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%';
 const fmtAddr = a => a ? a.slice(0,4)+'...'+a.slice(-4) : '—';
-const fmtNum  = n => n >= 1e9 ? (n/1e9).toFixed(2)+'B' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : Number(n).toFixed(2);
+const fmtNum  = n => { if (n == null || isNaN(n)) return '—'; n = Number(n); return n >= 1e9 ? (n/1e9).toFixed(2)+'B' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(2); };
 const pctClass = n => n == null ? 'gray' : n >= 0 ? 'green' : 'red';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
 
 function isValidSolAddress(addr) {
   try { new solanaWeb3.PublicKey(addr); return addr.length >= 32 && addr.length <= 44; }
@@ -943,6 +944,25 @@ async function toggleWallet() {
   await connectWallet();
 }
 
+async function getBestConnection() {
+  const customRpc = ST.settings.rpc;
+  // If user set a real custom RPC (not auto), try it first
+  const rpcs = (customRpc && customRpc !== 'auto')
+    ? [customRpc, ...RPC_LIST]
+    : RPC_LIST;
+  for (const rpc of rpcs) {
+    try {
+      const conn = new solanaWeb3.Connection(rpc, { commitment: 'confirmed', confirmTransactionInitialTimeout: 8000 });
+      const slot = await Promise.race([
+        conn.getSlot(),
+        new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 4000))
+      ]);
+      if (slot > 0) { console.log('✅ RPC connected:', rpc); return conn; }
+    } catch { continue; }
+  }
+  throw new Error('All RPC endpoints failed — check internet connection');
+}
+
 async function connectWallet() {
   if (!window.phantom?.solana?.isPhantom) {
     showToast('Phantom not found — install from phantom.app', 'err');
@@ -954,7 +974,8 @@ async function connectWallet() {
     const provider = window.phantom.solana;
     const resp = await provider.connect();
     ST.wallet = resp.publicKey.toString();
-    ST.conn = new solanaWeb3.Connection(ST.settings.rpc, { commitment: 'confirmed' });
+    showToast('Finding best RPC…', 'ok');
+    ST.conn = await getBestConnection();
     provider.on('accountChanged', pk => { if (pk) { ST.wallet = pk.toString(); refreshAll(); } else disconnectWallet(); });
     provider.on('disconnect', disconnectWallet);
     updateWalletUI();
@@ -967,8 +988,16 @@ async function connectWallet() {
 
 function disconnectWallet() {
   try { window.phantom?.solana?.disconnect(); } catch {}
-  ST.wallet = null; ST.tokens = []; ST.solBal = 0;
+  ST.wallet = null; ST.tokens = []; ST.solBal = 0; ST.solPrice = 0;
   updateWalletUI();
+  // Reset balance display
+  document.getElementById('walletBal').innerHTML = '— <span>SOL</span>';
+  document.getElementById('walletUSD').textContent = 'Connect wallet to view balance';
+  document.getElementById('pnlToday').textContent = '—';
+  document.getElementById('pnlTotal').textContent = '—';
+  document.getElementById('posCount').textContent = '0';
+  document.getElementById('recentActivity').innerHTML = '<div class="empty"><span>🔗</span><p>Connect your Phantom wallet<br>to see activity</p></div>';
+  document.getElementById('solPricePill').textContent = 'SOL —';
   renderPositions();
   showToast('Wallet disconnected', 'warn');
 }
@@ -985,8 +1014,26 @@ function updateWalletUI() {
 
 function copyAddr() {
   if (!ST.wallet) return;
-  navigator.clipboard?.writeText(ST.wallet);
+  copyToClipboard(ST.wallet);
   showToast('Address copied!', 'ok');
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).catch(() => copyFallback(text));
+  } else {
+    copyFallback(text);
+  }
+}
+
+function copyFallback(text) {
+  const el = document.createElement('textarea');
+  el.value = text;
+  el.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(el);
+  el.focus(); el.select();
+  try { document.execCommand('copy'); } catch {}
+  document.body.removeChild(el);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -994,40 +1041,101 @@ function copyAddr() {
 // ═══════════════════════════════════════════════════════════════
 async function refreshAll() {
   if (!ST.wallet) return;
-  await Promise.allSettled([fetchSolPrice(), fetchBalances()]);
+  // Fetch price first so USD is ready when balance renders
+  await fetchSolPrice();
+  await fetchBalances();
   checkLimitOrders();
   checkAutoSell();
 }
 
 async function fetchSolPrice() {
-  try {
-    const r = await fetch(`${JUP_PRICE}?ids=${SOL_MINT}`);
-    const d = await r.json();
-    ST.solPrice = parseFloat(d.data?.[SOL_MINT]?.price || 0);
-    const pill = document.getElementById('solPricePill');
-    pill.textContent = `SOL $${ST.solPrice.toFixed(2)}`;
-  } catch {}
+  const pill = document.getElementById('solPricePill');
+  const sources = [
+    // 1. Binance — fastest, no auth, perfect CORS
+    async () => {
+      const r = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT', { cache: 'no-store' });
+      const d = await r.json();
+      return parseFloat(d.price);
+    },
+    // 2. CoinGecko — free tier, no key needed
+    async () => {
+      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', { cache: 'no-store' });
+      const d = await r.json();
+      return parseFloat(d.solana.usd);
+    },
+    // 3. Jupiter fallback
+    async () => {
+      const r = await fetch(`${JUP_PRICE}?ids=${SOL_MINT}`, { cache: 'no-store' });
+      const d = await r.json();
+      return parseFloat(d.data?.[SOL_MINT]?.price || 0);
+    },
+    // 4. DexScreener SOL/USDC pair
+    async () => {
+      const r = await fetch(`${DEXSCREENER}/latest/dex/tokens/${SOL_MINT}`, { cache: 'no-store' });
+      const d = await r.json();
+      const pair = (d.pairs || []).find(p => p.chainId === 'solana');
+      return parseFloat(pair?.priceUsd || 0);
+    }
+  ];
+  for (const source of sources) {
+    try {
+      const price = await source();
+      if (price && price > 0) {
+        ST.solPrice = price;
+        pill.textContent = `SOL $${price.toFixed(2)}`;
+        // Update USD display immediately
+        if (ST.solBal > 0) {
+          document.getElementById('walletUSD').textContent = `≈ $${(ST.solBal * price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} USD`;
+        }
+        return;
+      }
+    } catch (e) { console.warn('Price source failed:', e.message); }
+  }
+  pill.textContent = 'SOL —';
+  console.error('All SOL price sources failed');
 }
 
 async function fetchBalances() {
-  if (!ST.wallet || !ST.conn) return;
+  if (!ST.wallet) return;
+  // Try to get a live connection if we don't have one
+  if (!ST.conn) {
+    try { ST.conn = await getBestConnection(); } catch (e) { showToast('No RPC available: ' + e.message, 'err'); return; }
+  }
   try {
     const pk = new solanaWeb3.PublicKey(ST.wallet);
-    // SOL balance
-    const lamports = await ST.conn.getBalance(pk);
+
+    // --- SOL balance ---
+    let lamports = 0;
+    try { lamports = await ST.conn.getBalance(pk, 'confirmed'); }
+    catch {
+      // RPC failed, try another
+      ST.conn = await getBestConnection();
+      lamports = await ST.conn.getBalance(pk, 'confirmed');
+    }
     ST.solBal = lamports / solanaWeb3.LAMPORTS_PER_SOL;
 
-    // Token accounts
-    const res = await ST.conn.getParsedTokenAccountsByOwner(pk, {
-      programId: new solanaWeb3.PublicKey(TOKEN_PROG)
-    });
+    // --- SPL token accounts ---
+    let res;
+    try {
+      res = await ST.conn.getParsedTokenAccountsByOwner(pk, { programId: new solanaWeb3.PublicKey(TOKEN_PROG) });
+    } catch (e2) {
+      console.warn('Token fetch failed on primary RPC:', e2.message);
+      ST.conn = await getBestConnection();
+      res = await ST.conn.getParsedTokenAccountsByOwner(pk, { programId: new solanaWeb3.PublicKey(TOKEN_PROG) });
+    }
 
     const raw = res.value
       .map(a => {
-        const info = a.account.data.parsed.info;
-        return { mint: info.mint, balance: parseFloat(info.tokenAmount.uiAmount || 0), rawBal: info.tokenAmount.amount, decimals: info.tokenAmount.decimals };
+        const info = a.account.data.parsed?.info;
+        if (!info) return null;
+        return {
+          mint:     info.mint,
+          balance:  parseFloat(info.tokenAmount?.uiAmount || 0),
+          rawBal:   info.tokenAmount?.amount || '0',
+          decimals: info.tokenAmount?.decimals || 9
+        };
       })
-      .filter(t => t.balance > 0);
+      .filter(t => t && t.balance > 0);
 
     if (!raw.length) {
       ST.tokens = [];
@@ -1035,16 +1143,12 @@ async function fetchBalances() {
       return;
     }
 
-    // Fetch prices + metadata in parallel (chunked)
     const mints = raw.map(t => t.mint);
-    const [prices, meta] = await Promise.all([
-      fetchPrices(mints),
-      fetchMeta(mints)
-    ]);
+    const [prices, meta] = await Promise.all([fetchPrices(mints), fetchMeta(mints)]);
 
     ST.tokens = raw.map(t => {
-      const m   = meta[t.mint] || {};
-      const p   = prices[t.mint] || {};
+      const m     = meta[t.mint]  || {};
+      const p     = prices[t.mint] || {};
       const price = p.price || 0;
       const value = t.balance * price;
       const pos   = ST.positions[t.mint];
@@ -1058,57 +1162,74 @@ async function fetchBalances() {
 
     renderAll();
   } catch (e) {
-    console.error('fetchBalances:', e);
-    showToast('Balance refresh failed: ' + e.message, 'err');
+    console.error('fetchBalances final error:', e);
+    showToast('Balance error: ' + e.message.slice(0, 80), 'err');
   }
 }
 
 async function fetchPrices(mints) {
   const out = {};
-  // Use DexScreener (more reliable for meme tokens)
+  // 1. Jupiter Price API v2 — fast and reliable for most tokens
   try {
     const chunks = [];
-    for (let i = 0; i < mints.length; i += 30) chunks.push(mints.slice(i, i+30));
+    for (let i = 0; i < mints.length; i += 100) chunks.push(mints.slice(i, i+100));
     await Promise.all(chunks.map(async chunk => {
-      const r = await fetch(`${DEXSCREENER}/latest/dex/tokens/${chunk.join(',')}`);
+      const r = await fetch(`${JUP_PRICE}?ids=${chunk.join(',')}&showExtraInfo=false`);
+      if (!r.ok) return;
       const d = await r.json();
-      (d.pairs || []).filter(p => p.chainId === 'solana').forEach(p => {
-        const mint = p.baseToken.address;
-        if (!out[mint] || (p.liquidity?.usd || 0) > (out[mint].liq || 0)) {
-          out[mint] = {
-            price:    parseFloat(p.priceUsd || 0),
-            change24h: p.priceChange?.h24,
-            volume24h: p.volume?.h24,
-            liq:       p.liquidity?.usd,
-            mcap:      p.marketCap,
-            pairUrl:   p.url
-          };
-        }
+      Object.entries(d.data || {}).forEach(([mint, info]) => {
+        if (info?.price) out[mint] = { price: parseFloat(info.price) };
       });
     }));
-  } catch {}
+  } catch (e) { console.warn('Jupiter price failed:', e.message); }
+
+  // 2. DexScreener for any still missing (meme tokens / new launches)
+  const missing = mints.filter(m => !out[m]);
+  if (missing.length) {
+    try {
+      const chunks = [];
+      for (let i = 0; i < missing.length; i += 30) chunks.push(missing.slice(i, i+30));
+      await Promise.all(chunks.map(async chunk => {
+        const r = await fetch(`${DEXSCREENER}/latest/dex/tokens/${chunk.join(',')}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        (d.pairs || []).filter(p => p.chainId === 'solana').forEach(p => {
+          const mint = p.baseToken.address;
+          if (!out[mint] || (p.liquidity?.usd || 0) > (out[mint].liq || 0)) {
+            out[mint] = {
+              price:    parseFloat(p.priceUsd || 0),
+              change24h: p.priceChange?.h24,
+              volume24h: p.volume?.h24,
+              liq:       p.liquidity?.usd,
+              mcap:      p.marketCap,
+              pairUrl:   p.url
+            };
+          }
+        });
+      }));
+    } catch (e) { console.warn('DexScreener price failed:', e.message); }
+  }
   return out;
 }
 
 async function fetchMeta(mints) {
   const out = {};
   await Promise.allSettled(mints.map(async mint => {
+    // Try Jupiter token list API (correct non-v1 endpoint)
     try {
-      // Try Jupiter token API first
-      const r = await fetch(`https://tokens.jup.ag/tokens/v1/token/${mint}`);
+      const r = await fetch(`https://tokens.jup.ag/token/${mint}`, { cache: 'no-store' });
       if (r.ok) {
         const d = await r.json();
-        out[mint] = { symbol: d.symbol, name: d.name, logoURI: d.logoURI, decimals: d.decimals };
-        return;
+        if (d.symbol) { out[mint] = { symbol: d.symbol, name: d.name, logoURI: d.logoURI, decimals: d.decimals }; return; }
       }
     } catch {}
     // Fallback: DexScreener
     try {
       const r = await fetch(`${DEXSCREENER}/latest/dex/tokens/${mint}`);
-      const d = await r.json();
-      const pair = (d.pairs || []).find(p => p.chainId === 'solana');
-      if (pair) {
-        out[mint] = { symbol: pair.baseToken.symbol, name: pair.baseToken.name, logoURI: null };
+      if (r.ok) {
+        const d = await r.json();
+        const pair = (d.pairs || []).find(p => p.chainId === 'solana');
+        if (pair) { out[mint] = { symbol: pair.baseToken.symbol, name: pair.baseToken.name, logoURI: null, decimals: 9 }; }
       }
     } catch {}
   }));
@@ -1432,6 +1553,7 @@ async function initBuy() {
 
   setLoading(true);
   try {
+    showToast('Getting quote…', 'ok');
     const quote = await getQuote(SOL_MINT, ST.currentBuyToken.mint, lamports, slippageBps);
     const outAmt = parseFloat(quote.outAmount) / Math.pow(10, ST.currentBuyToken.decimals || 9);
     const pricePct = parseFloat(quote.priceImpactPct || 0);
@@ -1463,48 +1585,78 @@ async function initBuy() {
 
     openModal('confirm-modal');
   } catch (e) {
-    showToast('Quote failed: ' + e.message, 'err');
+    console.error('Quote error:', e);
+    const msg = e.message || 'Unknown error';
+    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('fetch')) {
+      showToast('❌ Network error — Jupiter API unreachable. Try a VPN or different network.', 'err');
+    } else if (msg.includes('No routes') || msg.includes('no route')) {
+      showToast('❌ No swap route found for this token pair', 'err');
+    } else {
+      showToast('❌ Quote failed: ' + msg.slice(0, 80), 'err');
+    }
   } finally { setLoading(false); }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// EXECUTE PENDING TRADE (buy + sell unified — no duplicate)
+// ═══════════════════════════════════════════════════════════════
 async function executePendingTrade() {
   if (!ST.pendingTrade) return;
-  const { type, quote, solAmt, token, outAmt } = ST.pendingTrade;
+  const { type, quote, solAmt, token, outAmt, pct, solOut } = ST.pendingTrade;
   closeModal('confirm-modal');
   setLoading(true);
+
   try {
     const txid = await executeSwap(quote);
 
-    // Record position entry
-    const currentPrice = ST.currentBuyToken?.price || 0;
-    ST.positions[token.mint] = {
-      symbol:       token.symbol,
-      name:         token.name,
-      mint:         token.mint,
-      entryPrice:   currentPrice,
-      solSpent:     (ST.positions[token.mint]?.solSpent || 0) + solAmt,
-      solPriceAtEntry: ST.solPrice,
-      decimals:     token.decimals || 9
-    };
-    savePositions();
+    if (type === 'buy') {
+      // Record entry price and position
+      const entryPrice = ST.currentBuyToken?.price || token?.price || 0;
+      ST.positions[token.mint] = {
+        symbol:          token.symbol,
+        name:            token.name,
+        mint:            token.mint,
+        entryPrice:      entryPrice,
+        solSpent:        (ST.positions[token.mint]?.solSpent || 0) + solAmt,
+        solPriceAtEntry: ST.solPrice,
+        decimals:        token.decimals || 9
+      };
+      savePositions();
+      ST.txHistory.push({ type: 'buy', symbol: token.symbol, mint: token.mint, solAmt, tokensOut: outAmt, txid, ts: Date.now() });
+      showToast(`✅ Bought ${token.symbol}! TX: ${txid.slice(0,8)}…`, 'ok');
 
-    // Record TX history
-    ST.txHistory.push({ type: 'buy', symbol: token.symbol, mint: token.mint, solAmt, tokensOut: outAmt, txid, ts: Date.now() });
+    } else if (type === 'sell') {
+      // Update or remove position
+      if (pct >= 100) {
+        delete ST.positions[token.mint];
+      } else if (ST.positions[token.mint]) {
+        ST.positions[token.mint].solSpent = (ST.positions[token.mint].solSpent || 0) * (1 - pct / 100);
+      }
+      savePositions();
+      ST.txHistory.push({ type: 'sell', symbol: token.symbol, mint: token.mint, pct, solAmt: solOut, txid, ts: Date.now() });
+      showToast(`✅ Sold ${pct}% of ${token.symbol}! Got ${fmtSOL(solOut)} SOL`, 'ok');
+    }
+
     if (ST.txHistory.length > 100) ST.txHistory.shift();
     saveTxHistory();
-
-    showToast(`✅ Bought! TX: ${txid.slice(0,8)}…`, 'ok');
+    // Refresh balance after 4s to let chain confirm
     setTimeout(fetchBalances, 4000);
+
   } catch (e) {
     const msg = e.message || '';
-    if (msg.includes('rejected') || msg.includes('User rejected')) showToast('Transaction rejected', 'warn');
-    else showToast('Trade failed: ' + msg.slice(0, 60), 'err');
-  } finally { setLoading(false); ST.pendingTrade = null; }
+    if (msg.includes('rejected') || msg.includes('User rejected')) {
+      showToast('Transaction rejected by wallet', 'warn');
+    } else if (msg.includes('timeout')) {
+      showToast('⏱ TX sent but confirm timed out — check Solscan', 'warn');
+    } else {
+      showToast(`❌ ${type === 'buy' ? 'Buy' : 'Sell'} failed: ` + msg.slice(0, 80), 'err');
+      console.error('executePendingTrade error:', e);
+    }
+  } finally {
+    setLoading(false);
+    ST.pendingTrade = null;
+  }
 }
-
-// ═══════════════════════════════════════════════════════════════
-// TRADING — SELL
-// ═══════════════════════════════════════════════════════════════
 function openSellModal(mint) {
   const token = ST.tokens.find(t => t.mint === mint);
   if (!token) return;
@@ -1520,6 +1672,7 @@ function openSellModal(mint) {
 }
 
 async function initSell() {
+  if (!ST.wallet) { showToast('Connect wallet first!', 'err'); return; }
   const token = ST.currentSellToken;
   if (!token) return;
   const pct  = parseFloat(document.getElementById('sellPctInput').value) || 50;
@@ -1555,61 +1708,59 @@ async function initSell() {
 
     openModal('confirm-modal');
   } catch (e) {
-    showToast('Quote failed: ' + e.message, 'err');
+    console.error('Sell quote error:', e);
+    const msg = e.message || 'Unknown error';
+    if (msg.includes('Failed to fetch') || msg.includes('unreachable')) {
+      showToast('❌ Network error — Jupiter API unreachable', 'err');
+    } else {
+      showToast('❌ Sell quote failed: ' + msg.slice(0, 80), 'err');
+    }
     ST.pendingTrade = null;
   } finally { setLoading(false); }
-}
-
-// executePendingTrade handles both buy and sell
-const _origExec = executePendingTrade;
-async function executePendingTrade() {
-  if (!ST.pendingTrade) return;
-  if (ST.pendingTrade.type === 'sell') {
-    const { quote, token, pct, solOut } = ST.pendingTrade;
-    closeModal('confirm-modal');
-    setLoading(true);
-    try {
-      const txid = await executeSwap(quote);
-      // Update position
-      if (pct >= 100) delete ST.positions[token.mint];
-      else if (ST.positions[token.mint]) {
-        ST.positions[token.mint].solSpent *= (1 - pct / 100);
-      }
-      savePositions();
-      ST.txHistory.push({ type: 'sell', symbol: token.symbol, mint: token.mint, pct, solAmt: solOut, txid, ts: Date.now() });
-      if (ST.txHistory.length > 100) ST.txHistory.shift();
-      saveTxHistory();
-      showToast(`✅ Sold ${pct}%! Got ${fmtSOL(solOut)} SOL`, 'ok');
-      setTimeout(fetchBalances, 4000);
-    } catch (e) {
-      const msg = e.message || '';
-      if (msg.includes('rejected') || msg.includes('User rejected')) showToast('Transaction rejected', 'warn');
-      else showToast('Sell failed: ' + msg.slice(0, 60), 'err');
-    } finally { setLoading(false); ST.pendingTrade = null; }
-    return;
-  }
-  await _origExec();
 }
 
 // ═══════════════════════════════════════════════════════════════
 // JUPITER SWAP
 // ═══════════════════════════════════════════════════════════════
 async function getQuote(inputMint, outputMint, amount, slippageBps) {
-  const url = `${JUP_QUOTE}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&onlyDirectRoutes=false`;
-  const r = await fetch(url);
-  if (!r.ok) { const t = await r.text(); throw new Error(t.slice(0, 120)); }
-  return await r.json();
+  // Only Jupiter v6 is reliable — projectserum node is defunct
+  const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&onlyDirectRoutes=false`;
+  let lastErr;
+  // Retry up to 3 times (handles transient 429/503)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      if (attempt > 0) await sleep(800 * attempt);
+      const r = await fetch(url, { method: 'GET', mode: 'cors', headers: { 'Accept': 'application/json' } });
+      if (r.status === 429) { lastErr = new Error('Rate limited — slow down'); continue; }
+      if (!r.ok) { const t = await r.text(); lastErr = new Error(`Quote ${r.status}: ${t.slice(0,120)}`); continue; }
+      const data = await r.json();
+      if (data.error) throw new Error('Jupiter: ' + data.error);
+      if (!data.outAmount) throw new Error('Invalid quote response');
+      return data;
+    } catch (e) {
+      lastErr = e;
+      if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+        throw new Error('Jupiter API unreachable — check internet or try a VPN/Helius RPC');
+      }
+    }
+  }
+  throw lastErr || new Error('Quote failed after 3 attempts');
 }
 
 async function executeSwap(quoteResponse) {
+  if (!ST.wallet) throw new Error('Wallet not connected');
+  if (!ST.conn) {
+    ST.conn = await getBestConnection();
+  }
   const provider = window.phantom.solana;
+  if (!provider) throw new Error('Phantom wallet not found');
   const speed = ST.settings.speed || 'fast';
   const muLamports = { eco: 10000, fast: 150000, turbo: 500000 }[speed] || 150000;
 
   const body = {
     quoteResponse,
-    userPublicKey:          ST.wallet,
-    wrapAndUnwrapSol:       true,
+    userPublicKey:           ST.wallet,
+    wrapAndUnwrapSol:        true,
     dynamicComputeUnitLimit: true,
     computeUnitPriceMicroLamports: ST.settings.bolt ? muLamports * 2 : muLamports
   };
@@ -1618,26 +1769,42 @@ async function executeSwap(quoteResponse) {
     body.prioritizationFeeLamports = { jitoTipLamports: ST.settings.jitoTip || 5000 };
   }
 
-  const r = await fetch(`${JUP_QUOTE}/swap`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) { const t = await r.text(); throw new Error(t.slice(0, 120)); }
-  const { swapTransaction } = await r.json();
+  let swapTransaction;
+  try {
+    const r = await fetch(`https://quote-api.jup.ag/v6/swap`, {
+      method:  'POST',
+      mode:    'cors',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body:    JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`Swap API ${r.status}: ${txt.slice(0, 120)}`);
+    }
+    const data = await r.json();
+    if (!data.swapTransaction) throw new Error('No swap transaction returned: ' + JSON.stringify(data).slice(0,100));
+    swapTransaction = data.swapTransaction;
+  } catch (e) {
+    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+      throw new Error('Network error — check internet connection or use a VPN. Jupiter API may be blocked.');
+    }
+    throw e;
+  }
 
-  // Deserialize
-  const bytes = Uint8Array.from(atob(swapTransaction), c => c.charCodeAt(0));
-  const tx = solanaWeb3.VersionedTransaction.deserialize(bytes);
-
-  // Sign
+  // Deserialize + sign
+  const bytes  = Uint8Array.from(atob(swapTransaction), c => c.charCodeAt(0));
+  const tx     = solanaWeb3.VersionedTransaction.deserialize(bytes);
   const signed = await provider.signTransaction(tx);
 
   // Send
-  const raw = signed.serialize();
+  const raw  = signed.serialize();
   const txid = await ST.conn.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 3 });
 
-  // Confirm (with timeout)
+  // Confirm with timeout
   const { blockhash, lastValidBlockHeight } = await ST.conn.getLatestBlockhash();
   await Promise.race([
     ST.conn.confirmTransaction({ signature: txid, blockhash, lastValidBlockHeight }),
-    sleep(60000).then(() => { throw new Error('Confirmation timeout'); })
+    sleep(60000).then(() => { throw new Error('Confirmation timeout — check Solscan for status'); })
   ]);
 
   return txid;
@@ -1867,10 +2034,8 @@ function savePrompt() {
   saveSettings();
   closeModal('prompt-modal');
   updateSettingsUI();
-  // Rebuild connection if RPC changed
   if (_promptKey === 'rpc' && ST.wallet) {
-    ST.conn = new solanaWeb3.Connection(val || DEFAULT_RPC, { commitment: 'confirmed' });
-    showToast('RPC updated', 'ok');
+    getBestConnection().then(c => { ST.conn = c; showToast('RPC updated ✓', 'ok'); }).catch(() => showToast('RPC failed, keeping old', 'err'));
   } else {
     showToast('Setting saved', 'ok');
   }
@@ -1943,12 +2108,8 @@ function setSellPct(val, el) {
 }
 
 function copyRef() {
-  navigator.clipboard?.writeText(document.getElementById('refLink').textContent);
+  copyToClipboard(document.getElementById('refLink').textContent);
   showToast('Referral link copied!', 'ok');
-}
-
-function setWithdrawAmtBtn(pct) {
-  document.getElementById('withdrawAmt').value = ((ST.solBal - 0.001) * pct).toFixed(4);
 }
 
 // DCA interval selection
@@ -1982,7 +2143,8 @@ async function init() {
     try {
       const resp = await window.phantom.solana.connect({ onlyIfTrusted: true });
       ST.wallet = resp.publicKey.toString();
-      ST.conn   = new solanaWeb3.Connection(ST.settings.rpc || DEFAULT_RPC, { commitment: 'confirmed' });
+      showToast('Reconnecting…', 'ok');
+      ST.conn = await getBestConnection();
       updateWalletUI();
       await refreshAll();
     } catch {}
@@ -1999,9 +2161,25 @@ async function init() {
   }
 }
 
-// Wait for web3.js to load
-if (window.solanaWeb3) { init(); }
-else { document.querySelector('script[src*="solana"]').addEventListener('load', init); }
+// Wait for web3.js to load — with null-safe guard and retry
+function tryInit() {
+  if (window.solanaWeb3) {
+    init();
+  } else {
+    const s = document.querySelector('script[src*="solana"]');
+    if (s) {
+      s.addEventListener('load', init);
+      s.addEventListener('error', () => {
+        document.getElementById('toast').textContent = '❌ Failed to load Solana SDK — check internet';
+        document.getElementById('toast').className = 'toast err show';
+      });
+    } else {
+      // Retry after 500ms if script tag not found yet
+      setTimeout(tryInit, 500);
+    }
+  }
+}
+tryInit();
 </script>
 </body>
 </html>
