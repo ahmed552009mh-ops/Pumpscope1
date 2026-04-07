@@ -1587,13 +1587,7 @@ async function initBuy() {
   } catch (e) {
     console.error('Quote error:', e);
     const msg = e.message || 'Unknown error';
-    if (msg.includes('No route') || msg.includes('no liquidity') || msg.includes('too small')) {
-      showToast('❌ No route — try a larger amount or higher slippage', 'err');
-    } else if (msg.includes('CORS') || msg.includes('proxies failed')) {
-      showToast('❌ CORS blocked — open the file via localhost, not GitHub Pages', 'err');
-    } else {
-      showToast('❌ ' + msg.slice(0, 100), 'err');
-    }
+    showToast('❌ ' + msg.slice(0, 100), 'err');
   } finally { setLoading(false); }
 }
 
@@ -1709,93 +1703,72 @@ async function initSell() {
     openModal('confirm-modal');
   } catch (e) {
     console.error('Sell quote error:', e);
-    const msg = e.message || 'Unknown error';
-    if (msg.includes('CORS') || msg.includes('proxies failed')) {
-      showToast('❌ CORS blocked — open via localhost not GitHub Pages', 'err');
-    } else {
-      showToast('❌ Sell quote failed: ' + msg.slice(0, 90), 'err');
-    }
+    showToast('❌ ' + (e.message || 'Sell quote failed').slice(0, 120), 'err');
     ST.pendingTrade = null;
   } finally { setLoading(false); }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// JUPITER SWAP — with CORS proxy fallback chain
+// JUPITER API — direct calls, no proxy needed (Jupiter is CORS-open)
 // ═══════════════════════════════════════════════════════════════
 
-// Fetch with automatic timeout
-async function fetchWithTimeout(url, opts = {}, ms = 10000) {
-  const ctrl = new AbortController();
-  const tid = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
-  } finally {
-    clearTimeout(tid);
+async function jupGet(url) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(attempt * 1000);
+    try {
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 15000);
+      const r = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(tid);
+      if (r.status === 429) { await sleep(2000); continue; }
+      return r;
+    } catch (e) {
+      if (attempt === 2) throw new Error('Jupiter GET failed: ' + e.message);
+    }
   }
 }
 
-// Try a URL directly, then through CORS proxies if blocked
-async function fetchWithCorsProxies(url, opts = {}) {
-  // 1. Direct request first
-  try {
-    const r = await fetchWithTimeout(url, opts, 8000);
-    if (r.ok || r.status === 400) return r; // 400 = Jupiter error (still readable JSON)
-  } catch (e) {
-    console.warn('Direct fetch failed:', e.message);
-  }
-
-  // 2. CORS proxy chain — these proxy the request server-side
-  const PROXIES = [
-    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    u => `https://proxy.cors.sh/${u}`,
-    u => `https://cors-anywhere.herokuapp.com/${u}`,
-  ];
-
-  for (const proxy of PROXIES) {
+async function jupPost(url, body) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(attempt * 1000);
     try {
-      const proxiedUrl = proxy(url);
-      const proxyOpts = { ...opts };
-      // Proxy requests must be GET-like; for POST we embed payload in url isn't possible,
-      // so we only proxy GET (quotes). POST (swap) handles separately.
-      if (opts.method === 'POST') continue;
-      const r = await fetchWithTimeout(proxiedUrl, { ...proxyOpts, mode: 'cors' }, 8000);
-      if (r.ok) { console.log('✅ CORS proxy worked:', proxy(url).slice(0,40)); return r; }
-    } catch { continue; }
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 20000);
+      const r = await fetch(url, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+        signal:  ctrl.signal
+      });
+      clearTimeout(tid);
+      if (r.status === 429) { await sleep(2000); continue; }
+      return r;
+    } catch (e) {
+      if (attempt === 2) throw new Error('Jupiter POST failed: ' + e.message);
+    }
   }
-  throw new Error('CORS_BLOCKED');
 }
 
 async function getQuote(inputMint, outputMint, amount, slippageBps) {
-  const JUP_URL = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&onlyDirectRoutes=false&maxAccounts=64`;
-  let lastErr;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      if (attempt > 0) await sleep(1000);
-      const r = await fetchWithCorsProxies(JUP_URL, { method: 'GET', headers: { 'Accept': 'application/json' } });
-      let data;
-      try { data = await r.json(); } catch { throw new Error('Invalid JSON from Jupiter'); }
-      if (data.error) throw new Error('Jupiter: ' + data.error);
-      if (!data.outAmount) throw new Error('No route found — token may have no liquidity or amount too small');
-      return data;
-    } catch (e) {
-      lastErr = e;
-      if (e.message === 'CORS_BLOCKED') {
-        lastErr = new Error('All CORS proxies failed — open the bot from localhost instead of GitHub Pages');
-      }
-    }
+  const url = `https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}&onlyDirectRoutes=false&maxAccounts=64`;
+  const r = await jupGet(url);
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error(`Quote failed (${r.status}): ${txt.slice(0, 120)}`);
   }
-  throw lastErr;
+  const data = await r.json();
+  if (data.error) throw new Error('Jupiter: ' + data.error);
+  if (!data.outAmount) throw new Error('No route found — try a larger amount or higher slippage');
+  return data;
 }
 
 async function executeSwap(quoteResponse) {
   if (!ST.wallet) throw new Error('Wallet not connected');
-  if (!ST.conn) ST.conn = await getBestConnection();
-  const provider = window.phantom.solana;
-  if (!provider) throw new Error('Phantom wallet not found');
+  if (!ST.conn)   ST.conn = await getBestConnection();
+  const provider = window.phantom?.solana;
+  if (!provider)  throw new Error('Phantom wallet not found');
 
-  const speed = ST.settings.speed || 'fast';
+  const speed     = ST.settings.speed || 'fast';
   const muLamports = { eco: 10000, fast: 150000, turbo: 500000 }[speed] || 150000;
   const body = {
     quoteResponse,
@@ -1805,76 +1778,27 @@ async function executeSwap(quoteResponse) {
     computeUnitPriceMicroLamports: ST.settings.bolt ? muLamports * 2 : muLamports
   };
   if (ST.settings.mevProtect) {
-    body.prioritizationFeeLamports = { jitoTipLamports: ST.settings.jitoTip || 5000 };
+    body.prioritizationFeeLamports = { jitoTipLamports: Number(ST.settings.jitoTip) || 5000 };
   }
 
-  let swapTransaction;
-  // POST /swap — try direct then proxies that support POST
-  const swapEndpoints = [
-    async () => {
-      const r = await fetchWithTimeout('https://quote-api.jup.ag/v6/swap', {
-        method: 'POST', mode: 'cors',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify(body)
-      }, 15000);
-      return r;
-    },
-    async () => {
-      // corsproxy.io supports POST
-      const r = await fetchWithTimeout(`https://corsproxy.io/?${encodeURIComponent('https://quote-api.jup.ag/v6/swap')}`, {
-        method: 'POST', mode: 'cors',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-requested-with': 'phantom-bot' },
-        body: JSON.stringify(body)
-      }, 15000);
-      return r;
-    },
-    async () => {
-      const r = await fetchWithTimeout(`https://proxy.cors.sh/https://quote-api.jup.ag/v6/swap`, {
-        method: 'POST', mode: 'cors',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-cors-api-key': 'temp_placeholder' },
-        body: JSON.stringify(body)
-      }, 15000);
-      return r;
-    }
-  ];
-
-  let swapResp;
-  for (const attempt of swapEndpoints) {
-    try {
-      swapResp = await attempt();
-      if (swapResp.ok) break;
-      const txt = await swapResp.text();
-      throw new Error(`Swap API ${swapResp.status}: ${txt.slice(0,120)}`);
-    } catch(e) {
-      lastErr = e; // lastErr is in scope from getQuote — use a local one
-      console.warn('Swap endpoint failed:', e.message);
-    }
+  const swapResp = await jupPost('https://quote-api.jup.ag/v6/swap', body);
+  if (!swapResp.ok) {
+    const txt = await swapResp.text().catch(() => '');
+    throw new Error(`Swap failed (${swapResp.status}): ${txt.slice(0, 120)}`);
   }
-
-  if (!swapResp || !swapResp.ok) {
-    throw new Error('Swap blocked by CORS on all endpoints. Run locally: python3 -m http.server 8080');
-  }
-
   const swapData = await swapResp.json();
-  if (!swapData.swapTransaction) throw new Error('No swap transaction returned from Jupiter');
-  swapTransaction = swapData.swapTransaction;
+  if (!swapData.swapTransaction) throw new Error('No transaction returned from Jupiter: ' + JSON.stringify(swapData).slice(0, 80));
 
-  // Deserialize + sign
-  const bytes  = Uint8Array.from(atob(swapTransaction), c => c.charCodeAt(0));
+  const bytes  = Uint8Array.from(atob(swapData.swapTransaction), c => c.charCodeAt(0));
   const tx     = solanaWeb3.VersionedTransaction.deserialize(bytes);
   const signed = await provider.signTransaction(tx);
+  const txid   = await ST.conn.sendRawTransaction(signed.serialize(), { skipPreflight: true, maxRetries: 3 });
 
-  // Send
-  const raw  = signed.serialize();
-  const txid = await ST.conn.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 3 });
-
-  // Confirm with timeout
   const { blockhash, lastValidBlockHeight } = await ST.conn.getLatestBlockhash();
   await Promise.race([
     ST.conn.confirmTransaction({ signature: txid, blockhash, lastValidBlockHeight }),
-    sleep(60000).then(() => { throw new Error('Confirmation timeout — check Solscan for status'); })
+    sleep(60000).then(() => { throw new Error('Confirm timeout — check Solscan: ' + txid); })
   ]);
-
   return txid;
 }
 
